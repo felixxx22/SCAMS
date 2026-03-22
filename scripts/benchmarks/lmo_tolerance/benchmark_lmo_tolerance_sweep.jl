@@ -2,7 +2,13 @@ using Pkg
 
 project_root = normpath(joinpath(@__DIR__, "..", "..", ".."))
 Pkg.activate(project_root)
-Pkg.instantiate()
+try
+    Pkg.instantiate()
+catch err
+    @warn "Pkg.instantiate failed for current Julia version; attempting Pkg.resolve() + Pkg.instantiate()" err
+    Pkg.resolve()
+    Pkg.instantiate()
+end
 
 include("../../../MESDP.jl")
 include("../../../ReadGSet.jl")
