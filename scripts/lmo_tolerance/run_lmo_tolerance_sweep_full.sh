@@ -11,6 +11,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
+COMPAT_ENV_DIR="$PROJECT_ROOT/.julia_env_compat"
+mkdir -p "$COMPAT_ENV_DIR"
+cp "$PROJECT_ROOT/Project.toml" "$COMPAT_ENV_DIR/Project.toml"
+
 if ! command -v "$JULIA_CMD" >/dev/null 2>&1; then
     echo "Error: Julia executable '$JULIA_CMD' was not found in PATH." >&2
     echo "Pass an explicit Julia path as the first argument." >&2
@@ -18,8 +22,8 @@ if ! command -v "$JULIA_CMD" >/dev/null 2>&1; then
 fi
 
 echo "Starting full LMO tolerance sweep from $PROJECT_ROOT"
-"$JULIA_CMD" --project="$PROJECT_ROOT" -e 'using Pkg; try; Pkg.instantiate(); catch err; @warn "Pkg.instantiate failed; retrying with Pkg.resolve()+Pkg.instantiate()" err; Pkg.resolve(); Pkg.instantiate(); end'
-"$JULIA_CMD" --project="$PROJECT_ROOT" "$SCRIPT_DIR/benchmark_lmo_tolerance_sweep_full.jl"
+"$JULIA_CMD" --project="$COMPAT_ENV_DIR" -e 'using Pkg; Pkg.instantiate()'
+"$JULIA_CMD" --project="$COMPAT_ENV_DIR" "$SCRIPT_DIR/benchmark_lmo_tolerance_sweep_full.jl"
 
 echo "Full LMO tolerance sweep finished."
 echo "Results: $PROJECT_ROOT/Result/benchmarks_lmo_tolerance/full"
