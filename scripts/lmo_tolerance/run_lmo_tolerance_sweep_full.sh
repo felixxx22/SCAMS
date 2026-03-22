@@ -18,7 +18,8 @@ if ! command -v "$JULIA_CMD" >/dev/null 2>&1; then
 fi
 
 echo "Starting full LMO tolerance sweep from $PROJECT_ROOT"
-"$JULIA_CMD" "$SCRIPT_DIR/benchmark_lmo_tolerance_sweep_full.jl"
+"$JULIA_CMD" --project="$PROJECT_ROOT" -e 'using Pkg; Pkg.instantiate()'
+"$JULIA_CMD" --project="$PROJECT_ROOT" "$SCRIPT_DIR/benchmark_lmo_tolerance_sweep_full.jl"
 
 echo "Full LMO tolerance sweep finished."
 echo "Results: $PROJECT_ROOT/Result/benchmarks_lmo_tolerance/full"
