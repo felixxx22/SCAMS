@@ -1,4 +1,4 @@
-include("../../benchmark_lmo_tolerance_sweep.jl")
+include("../benchmarks/lmo_tolerance/benchmark_lmo_tolerance_sweep.jl")
 
 # Full (big) run across all Gset and BigExample graphs.
 # Resume mode is enabled so interrupted runs can be restarted safely.
