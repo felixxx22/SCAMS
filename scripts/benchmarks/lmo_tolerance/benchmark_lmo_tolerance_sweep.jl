@@ -1,3 +1,9 @@
+using Pkg
+
+project_root = normpath(joinpath(@__DIR__, "..", "..", ".."))
+Pkg.activate(project_root)
+Pkg.instantiate()
+
 include("../../../MESDP.jl")
 include("../../../ReadGSet.jl")
 
