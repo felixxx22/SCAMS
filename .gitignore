@@ -7,3 +7,4 @@ test.jl
 toy.txt
 *.csv
 GoogleDistance/
+local_results/

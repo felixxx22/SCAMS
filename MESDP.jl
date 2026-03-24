@@ -105,7 +105,7 @@ end
 
     Returns `(w, q, leading_eigenvalue)`.
 """
-function ArnoldiGrad(A, v; lowerBound=0, upperBound=1e16, tol=1e-2, D=ones(1, n), mode="A", returnMetrics=false, arnoldi_mindim=12, arnoldi_maxdim=20, arnoldi_restarts=500)
+function ArnoldiGrad(A, v; lowerBound=0, upperBound=1e16, tol=1e-2, D=ones(1, n), mode="A", returnMetrics=false, arnoldi_mindim=12, arnoldi_maxdim=20, arnoldi_restarts=500, arnoldi_initvec=nothing)
     Mn = lowerBound ./ D
     Mx = upperBound ./ D
     λ = sqrt.(clamp.(1 ./ (2 .* sqrt.(v)), Mn, Mx))
@@ -126,6 +126,7 @@ function ArnoldiGrad(A, v; lowerBound=0, upperBound=1e16, tol=1e-2, D=ones(1, n)
         maxdim=local_maxdim,
         restarts=local_restarts,
         mode=mode,
+        initvec=arnoldi_initvec,
     )
     t1_ns = time_ns()
     eig, eigv = ArnoldiMethodMod.partialeigen(decomp)
@@ -215,7 +216,7 @@ end
 
     Returns final iterate and best rounded sample/cut surrogate.
 """
-function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e16, plot=false, linesearch=false, numSample=1, mode="A", logfilename=nothing, startεd0=-3.0, benchmark=false, benchmarkTag=nothing, arnoldi_mindim=12, arnoldi_maxdim=20, arnoldi_restarts=500, adaptive_arnoldi_budget=false, update_low_threshold=1e-3, update_high_threshold=1e-2, low_budget_scale=0.7, high_budget_scale=1.6, tighten_arnoldi_tol=true)
+function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e16, plot=false, linesearch=false, numSample=1, mode="A", logfilename=nothing, startεd0=-3.0, benchmark=false, benchmarkTag=nothing, arnoldi_mindim=12, arnoldi_maxdim=20, arnoldi_restarts=500, adaptive_arnoldi_budget=false, update_low_threshold=1e-3, update_high_threshold=1e-2, low_budget_scale=0.7, high_budget_scale=1.6, tighten_arnoldi_tol=true, arnoldi_initial_vector=nothing, warmstart_reuse_leading_eigvec=false)
     v = v0
     t = t0
     # Keeps compatibility with the 2/(t+start) schedule used elsewhere.
@@ -252,6 +253,25 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
         open(string(logfilename), "w") do io end
     end
 
+    requested_initvec = arnoldi_initial_vector
+    if requested_initvec !== nothing
+        if !(requested_initvec isa AbstractVector)
+            @warn "Ignoring arnoldi_initial_vector: expected a vector input."
+            requested_initvec = nothing
+        elseif length(requested_initvec) != size(A, 1)
+            @warn "Ignoring arnoldi_initial_vector: expected length $(size(A, 1)), got $(length(requested_initvec))."
+            requested_initvec = nothing
+        elseif !all(isfinite, requested_initvec)
+            @warn "Ignoring arnoldi_initial_vector: expected finite values."
+            requested_initvec = nothing
+        elseif norm(requested_initvec) <= eps(Float64)
+            @warn "Ignoring arnoldi_initial_vector: expected non-zero norm."
+            requested_initvec = nothing
+        end
+    end
+    first_lmo_init_source = requested_initvec === nothing ? "random" : "user"
+    current_arnoldi_initvec = requested_initvec
+
     # Start from configured Arnoldi tolerance; optional tightening can refine it later.
     εd0 = startεd0
     init_mindim, init_maxdim, init_restarts, init_budget_tier = _resolve_arnoldi_budget(
@@ -278,6 +298,7 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
         arnoldi_mindim=init_mindim,
         arnoldi_maxdim=init_maxdim,
         arnoldi_restarts=init_restarts,
+        arnoldi_initvec=current_arnoldi_initvec,
     )
     lmo_calls += 1
     total_lmo_ns += lmo_metrics.total_ns
@@ -289,6 +310,11 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
     # Previous LMO eigenpair acts as baseline for next-call movement tracking.
     prev_w = copy(w)
     prev_λ = λ
+    if warmstart_reuse_leading_eigvec
+        current_arnoldi_initvec = copy(w)
+    else
+        current_arnoldi_initvec = nothing
+    end
 
     fw_iter_idx = 0
     while gap > ε
@@ -327,6 +353,7 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
             high_budget_scale,
         )
 
+        lmo_init_source = current_arnoldi_initvec === nothing ? "random" : "previous_eigvec"
         w, q, λ, lmo_metrics = ArnoldiGrad(
             A,
             v,
@@ -339,6 +366,7 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
             arnoldi_mindim=next_mindim,
             arnoldi_maxdim=next_maxdim,
             arnoldi_restarts=next_restarts,
+            arnoldi_initvec=current_arnoldi_initvec,
         )
         lmo_calls += 1
         total_lmo_ns += lmo_metrics.total_ns
@@ -383,6 +411,7 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
                     "delta_v_l2", "delta_v_linf", "delta_v_rel_l2",
                     "lambda_t", "lambda_next", "delta_lambda_next",
                     "cosine_similarity_next", "delta_w_next",
+                    "lmo_init_source",
                     "arnoldi_budget_tier", "arnoldi_mindim", "arnoldi_maxdim", "arnoldi_restarts",
                     # Duplicated aliases for Python plotting without additional joins/renaming.
                     "next_lmo_time_sec", "next_partialschur_time_sec", "next_partialeigen_time_sec",
@@ -396,6 +425,7 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
                     delta_v_l2, delta_v_linf, delta_v_rel_l2,
                     prev_λ, λ, delta_lambda_next,
                     cosine_similarity_next, delta_w_next,
+                    lmo_init_source,
                     budget_tier, lmo_metrics.mindim, lmo_metrics.maxdim, lmo_metrics.restarts,
                     lmo_metrics.total_ns / 1e9, lmo_metrics.partialschur_ns / 1e9, lmo_metrics.partialeigen_ns / 1e9,
                     lmo_metrics.mvproducts, lmo_metrics.converged,
@@ -405,6 +435,11 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
 
         prev_w = copy(w)
         prev_λ = λ
+        if warmstart_reuse_leading_eigvec
+            current_arnoldi_initvec = copy(w)
+        else
+            current_arnoldi_initvec = nothing
+        end
 
         # Optionally tighten Arnoldi tolerance to match optimization progress.
         if tighten_arnoldi_tol && gap < 10^(εd0)
@@ -464,6 +499,10 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
         low_budget_scale=low_budget_scale,
         high_budget_scale=high_budget_scale,
         tighten_arnoldi_tol=tighten_arnoldi_tol,
+        warmstart_reuse_leading_eigvec=warmstart_reuse_leading_eigvec,
+        warmstart_custom_init_provided=arnoldi_initial_vector !== nothing,
+        warmstart_custom_init_accepted=requested_initvec !== nothing,
+        first_lmo_init_source=first_lmo_init_source,
     )
 
     if benchmark && summary_log_path !== nothing
@@ -478,7 +517,8 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
                 "corr_delta_v_to_next_lmo_time", "corr_delta_v_to_next_mvproducts", "corr_delta_v_to_delta_lambda",
                 "adaptive_arnoldi_budget", "arnoldi_mindim", "arnoldi_maxdim", "arnoldi_restarts",
                 "update_low_threshold", "update_high_threshold", "low_budget_scale", "high_budget_scale",
-                "tighten_arnoldi_tol",
+                "tighten_arnoldi_tol", "warmstart_reuse_leading_eigvec", "warmstart_custom_init_provided",
+                "warmstart_custom_init_accepted", "first_lmo_init_source",
             ],
             [
                 run_tag, mode, linesearch, ε, startεd0, fw_iter_idx,
@@ -489,7 +529,8 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
                 corr_delta_v_to_next_lmo_time, corr_delta_v_to_next_mvproducts, corr_delta_v_to_delta_lambda,
                 adaptive_arnoldi_budget, arnoldi_mindim, arnoldi_maxdim, arnoldi_restarts,
                 update_low_threshold, update_high_threshold, low_budget_scale, high_budget_scale,
-                tighten_arnoldi_tol,
+                tighten_arnoldi_tol, warmstart_reuse_leading_eigvec, arnoldi_initial_vector !== nothing,
+                requested_initvec !== nothing, first_lmo_init_source,
             ],
         )
     end

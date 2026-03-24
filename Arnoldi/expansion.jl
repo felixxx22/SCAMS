@@ -2,19 +2,35 @@ using Random
 using LinearAlgebra
 using SparseArrays
 """
-    reinitialize!(a::Arnoldi, j::Int = 0) → a
+    reinitialize!(a::Arnoldi, j::Int = 0; initvec=nothing) → a
 
-Generate a random `j+1`th column orthonormal against V[:,1:j]
+Generate the `j+1`th column orthonormal against `V[:,1:j]`.
+When `j == 0` and `initvec` is provided with the correct length and nonzero norm,
+that vector is used as deterministic initialization. Otherwise a random vector is used.
 
 Returns true if the column is a valid new basis vector.
 Returns false if the column is numerically in the span of the previous vectors.
 """
-function reinitialize!(arnoldi::Arnoldi{T}, j::Int=0) where {T}
+function reinitialize!(arnoldi::Arnoldi{T}, j::Int=0; initvec=nothing) where {T}
     V = arnoldi.V
     v = view(V, :, j + 1)
 
-    # Generate a new random column
-    rand!(v)
+    used_custom_init = false
+    if j == 0 && initvec isa AbstractVector && length(initvec) == length(v)
+        if all(isfinite, initvec)
+            copyto!(v, initvec)
+            initnorm = norm(v)
+            if isfinite(initnorm) && initnorm > eps(real(T))
+                v ./= initnorm
+                used_custom_init = true
+            end
+        end
+    end
+
+    # Fallback to random initialization for default behavior and invalid custom vectors.
+    if !used_custom_init
+        rand!(v)
+    end
 
     # Norm before orthogonalization
     rnorm = norm(v)
