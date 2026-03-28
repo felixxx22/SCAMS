@@ -95,18 +95,48 @@ def _strategy_color(strategy: str) -> str:
 
 def _parse_runs(path: str) -> Dict[str, RunInfo]:
     run_map: Dict[str, RunInfo] = {}
-    with open(path, "r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            tag = row.get("run_tag", "")
-            if not tag:
-                continue
-            run_map[tag] = RunInfo(
-                dataset=row.get("dataset", ""),
-                graph_name=row.get("graph_name", ""),
-                strategy=row.get("strategy", ""),
-            )
+    if not os.path.exists(path):
+        return run_map  # Return empty map if runs.csv doesn't exist
+    try:
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                tag = row.get("run_tag", "")
+                if not tag:
+                    continue
+                run_map[tag] = RunInfo(
+                    dataset=row.get("dataset", ""),
+                    graph_name=row.get("graph_name", ""),
+                    strategy=row.get("strategy", ""),
+                )
+    except Exception as e:
+        print(f"Warning: Could not read runs.csv: {e}")
     return run_map
+
+
+def _infer_metadata_from_path(file_path: str) -> Tuple[str, str]:
+    """Infer dataset and graph_name from file path like 'Gset/per_graph/g1_summary.csv.iters.csv'."""
+    parts = file_path.replace("\\", "/").split("/")
+    dataset = ""
+    graph_name = ""
+    for i, part in enumerate(parts):
+        if part in ("Gset", "BigExample"):
+            dataset = part
+            break
+    if len(parts) > 0:
+        filename = parts[-1]
+        if filename.endswith("_summary.csv.iters.csv"):
+            graph_name = filename.replace("_summary.csv.iters.csv", ".txt")
+    return dataset, graph_name
+
+
+def _infer_strategy_from_tag(tag: str) -> str:
+    """Extract strategy from run_tag like 'gset_g1_with_vector_r0'."""
+    if "with_vector" in tag:
+        return "with_vector"
+    if "without_vector" in tag:
+        return "without_vector"
+    return "unknown"
 
 
 def _iter_duration_sec(row: Dict[str, str]) -> float:
@@ -129,12 +159,22 @@ def _load_points(input_root: str, run_map: Dict[str, RunInfo]) -> Tuple[List[Ite
             reader = csv.DictReader(f)
             for row in reader:
                 tag = row.get("run_tag", "")
-                if not tag or tag not in run_map:
+                if not tag:
                     continue
                 per_run_rows[tag].append(row)
 
         for tag, rows in per_run_rows.items():
-            info = run_map[tag]
+            # Look up metadata from run_map, or infer from file path + tag
+            if tag in run_map:
+                info = run_map[tag]
+            else:
+                # Fallback: infer from file path and run_tag
+                dataset, graph_name = _infer_metadata_from_path(path)
+                strategy = _infer_strategy_from_tag(tag)
+                info = RunInfo(dataset=dataset, graph_name=graph_name, strategy=strategy)
+                if not dataset or not strategy:
+                    continue  # Skip if we can't infer essential metadata
+            
             rows.sort(key=lambda r: _to_int(r.get("iteration", "0")))
             elapsed = 0.0
 
@@ -425,8 +465,8 @@ def main() -> None:
 
     runs_csv = os.path.join(input_root, "runs.csv")
     if not os.path.exists(runs_csv):
-        raise RuntimeError(f"Missing runs.csv at: {runs_csv}")
-
+        print(f"Warning: runs.csv not found at {runs_csv}; will infer metadata from file paths and run tags.")
+    
     run_map = _parse_runs(runs_csv)
     iter_points, time_points = _load_points(input_root, run_map)
     if not iter_points:

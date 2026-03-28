@@ -44,6 +44,15 @@ class TimeRow:
     gap: float
 
 
+@dataclass
+class LmoTimeRow:
+    dataset: str
+    graph_name: str
+    start_epsilon_d0: float
+    lmo_time_sec: float
+    gap: float
+
+
 def _to_float(value: str, default: float = float("nan")) -> float:
     try:
         return float(value)
@@ -106,6 +115,14 @@ def _iter_duration_sec(row: Dict[str, str]) -> float:
     return t
 
 
+def _lmo_time_sec(row: Dict[str, str]) -> float:
+    """Extract LMO-only time from iteration row."""
+    t = _to_float(row.get("lmo_time_sec", "nan"))
+    if math.isnan(t) or t < 0:
+        return 0.0
+    return t
+
+
 def _load_time_rows(input_root: str, run_map: Dict[str, RunInfo] | None = None) -> List[TimeRow]:
     rows: List[TimeRow] = []
     iter_paths = sorted(glob.glob(os.path.join(input_root, "*", "per_graph", "*_summary.csv.iters.csv")))
@@ -156,6 +173,55 @@ def _load_time_rows(input_root: str, run_map: Dict[str, RunInfo] | None = None) 
     return rows
 
 
+def _load_lmo_time_rows(input_root: str, run_map: Dict[str, RunInfo] | None = None) -> List[LmoTimeRow]:
+    """Load per-iteration LMO times and gaps for plotting LMO time vs gap."""
+    rows: List[LmoTimeRow] = []
+    iter_paths = sorted(glob.glob(os.path.join(input_root, "*", "per_graph", "*_summary.csv.iters.csv")))
+
+    for path in iter_paths:
+        per_run: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                tag = row.get("run_tag", "")
+                if not tag:
+                    continue
+                per_run[tag].append(row)
+
+        for tag, run_rows in per_run.items():
+            info = run_map.get(tag) if run_map else None
+            run_rows.sort(key=lambda r: _to_int(r.get("iteration", "0")))
+
+            for row in run_rows:
+                gap = _to_float(row.get("gap", "nan"))
+                lmo_time = _lmo_time_sec(row)
+                if math.isnan(gap) or lmo_time <= 0:
+                    continue
+
+                if info is not None:
+                    dataset = info.dataset
+                    graph_name = info.graph_name
+                    start_epsilon_d0 = info.start_epsilon_d0
+                else:
+                    dataset = _infer_dataset_from_iter_path(input_root, path)
+                    graph_name = _infer_graph_name_from_iter_path(path)
+                    start_epsilon_d0 = _to_float(row.get("epsilon_d0", "nan"))
+                    if math.isnan(start_epsilon_d0):
+                        continue
+
+                rows.append(
+                    LmoTimeRow(
+                        dataset=dataset,
+                        graph_name=graph_name,
+                        start_epsilon_d0=start_epsilon_d0,
+                        lmo_time_sec=lmo_time,
+                        gap=max(gap, 1e-18),
+                    )
+                )
+
+    return rows
+
+
 def _group_mean_std(values: Sequence[float]) -> Tuple[float, float]:
     if not values:
         return 0.0, 0.0
@@ -179,6 +245,46 @@ def _auto_bin_width(rows: Sequence[TimeRow]) -> float:
 def _time_bin(t: float, width: float) -> float:
     idx = int(math.floor(t / width))
     return (idx + 1) * width
+
+
+def _gap_log_bin(gap: float, num_bins: int = 50) -> float:
+    """Bin gaps logarithmically. Returns the upper bound of the bin."""
+    if gap <= 0:
+        return 1e-18
+    log_gap = math.log10(gap)
+    # Find min and max log scale across a reasonable range
+    log_min = -18.0
+    log_max = 2.0
+    bin_width = (log_max - log_min) / num_bins
+    bin_idx = int(math.floor((log_gap - log_min) / bin_width))
+    bin_idx = max(0, min(num_bins - 1, bin_idx))
+    return 10.0 ** (log_min + (bin_idx + 1) * bin_width)
+
+
+def _aggregate_graph_lmo_gap(rows: Sequence[LmoTimeRow], num_gap_bins: int = 50) -> Dict[Tuple[str, str, float, float], Tuple[float, float, int]]:
+    grouped: Dict[Tuple[str, str, float, float], List[float]] = defaultdict(list)
+    for r in rows:
+        gap_bin = _gap_log_bin(r.gap, num_gap_bins)
+        grouped[(r.dataset, r.graph_name, r.start_epsilon_d0, gap_bin)].append(r.lmo_time_sec)
+
+    out: Dict[Tuple[str, str, float, float], Tuple[float, float, int]] = {}
+    for key, vals in grouped.items():
+        tmean, tstd = _group_mean_std(vals)
+        out[key] = (tmean, tstd, len(vals))
+    return out
+
+
+def _aggregate_dataset_lmo_gap(rows: Sequence[LmoTimeRow], num_gap_bins: int = 50) -> Dict[Tuple[str, float, float], Tuple[float, float, int]]:
+    grouped: Dict[Tuple[str, float, float], List[float]] = defaultdict(list)
+    for r in rows:
+        gap_bin = _gap_log_bin(r.gap, num_gap_bins)
+        grouped[(r.dataset, r.start_epsilon_d0, gap_bin)].append(r.lmo_time_sec)
+
+    out: Dict[Tuple[str, float, float], Tuple[float, float, int]] = {}
+    for key, vals in grouped.items():
+        tmean, tstd = _group_mean_std(vals)
+        out[key] = (tmean, tstd, len(vals))
+    return out
 
 
 def _aggregate_graph(rows: Sequence[TimeRow], bin_width_sec: float) -> Dict[Tuple[str, str, float, float], Tuple[float, float, int]]:
@@ -302,6 +408,90 @@ def _plot_dataset_summary(rows: Sequence[TimeRow], output_dir: str, bin_width_se
         plt.close(fig)
 
 
+def _plot_per_graph_lmo_gap(rows: Sequence[LmoTimeRow], output_dir: str, num_gap_bins: int = 50) -> None:
+    grouped: Dict[Tuple[str, str], List[LmoTimeRow]] = defaultdict(list)
+    for r in rows:
+        grouped[(r.dataset, r.graph_name)].append(r)
+
+    graph_dir = os.path.join(output_dir, "graphs_lmo_gap")
+    os.makedirs(graph_dir, exist_ok=True)
+
+    for (dataset, graph_name), items in sorted(grouped.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        by_tol_gap: Dict[Tuple[float, float], List[float]] = defaultdict(list)
+        for r in items:
+            gap_bin = _gap_log_bin(r.gap, num_gap_bins)
+            by_tol_gap[(r.start_epsilon_d0, gap_bin)].append(r.lmo_time_sec)
+
+        tols = sorted({k[0] for k in by_tol_gap.keys()})
+        stem = _graph_stem(graph_name)
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for d0 in tols:
+            pts = []
+            for (tol, gap_bin), vals in by_tol_gap.items():
+                if tol != d0:
+                    continue
+                tmean, _ = _group_mean_std(vals)
+                pts.append((gap_bin, tmean))
+            pts.sort(key=lambda p: p[0])
+            if not pts:
+                continue
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            ax.plot(xs, ys, linewidth=2.0, marker='o', label=f"tol=1e{d0:g}")
+
+        ax.set_xscale("log")
+        ax.set_title(f"LMO Time vs Gap Distance | {dataset} | {graph_name}")
+        ax.set_xlabel("gap (log scale)")
+        ax.set_ylabel("mean LMO time (sec)")
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+        fig.tight_layout()
+
+        out_path = os.path.join(graph_dir, f"{dataset}_{stem}_lmo_time_vs_gap.png")
+        fig.savefig(out_path, dpi=180)
+        plt.close(fig)
+
+
+def _plot_dataset_summary_lmo_gap(rows: Sequence[LmoTimeRow], output_dir: str, num_gap_bins: int = 50) -> None:
+    grouped: Dict[str, List[LmoTimeRow]] = defaultdict(list)
+    for r in rows:
+        grouped[r.dataset].append(r)
+
+    for dataset, items in sorted(grouped.items()):
+        by_tol_gap: Dict[Tuple[float, float], List[float]] = defaultdict(list)
+        for r in items:
+            gap_bin = _gap_log_bin(r.gap, num_gap_bins)
+            by_tol_gap[(r.start_epsilon_d0, gap_bin)].append(r.lmo_time_sec)
+
+        tols = sorted({k[0] for k in by_tol_gap.keys()})
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        for d0 in tols:
+            pts = []
+            for (tol, gap_bin), vals in by_tol_gap.items():
+                if tol != d0:
+                    continue
+                tmean, _ = _group_mean_std(vals)
+                pts.append((gap_bin, tmean))
+            pts.sort(key=lambda p: p[0])
+            if not pts:
+                continue
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            ax.plot(xs, ys, linewidth=2.0, marker='o', label=f"tol=1e{d0:g}")
+
+        ax.set_xscale("log")
+        ax.set_title(f"Dataset Summary LMO Time vs Gap Distance | {dataset}")
+        ax.set_xlabel("gap (log scale)")
+        ax.set_ylabel("mean LMO time (sec) across all graphs")
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(output_dir, f"{dataset}_dataset_lmo_time_vs_gap.png"), dpi=180)
+        plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot gap-vs-time asymptotic curves for LMO tolerance sweeps.")
     parser.add_argument("--phase", default="subset", choices=["subset", "full"], help="Sweep phase directory under Result/benchmarks_lmo_tolerance")
@@ -356,6 +546,36 @@ def main() -> None:
 
     _plot_per_graph(time_rows, output_dir, bin_width_sec)
     _plot_dataset_summary(time_rows, output_dir, bin_width_sec)
+
+    # Load and process LMO time vs gap data
+    lmo_rows = _load_lmo_time_rows(input_root, run_map)
+    if lmo_rows:
+        print(f"Loaded {len(lmo_rows)} LMO time measurements")
+
+        lmo_graph_agg = _aggregate_graph_lmo_gap(lmo_rows, num_gap_bins=50)
+        lmo_graph_rows = []
+        for (dataset, graph_name, d0, gap_bin), (tmean, tstd, count) in sorted(lmo_graph_agg.items(), key=lambda x: (x[0][0], x[0][1], x[0][2], x[0][3])):
+            lmo_graph_rows.append([dataset, graph_name, d0, 10.0**d0, gap_bin, tmean, tstd, count])
+
+        lmo_dataset_agg = _aggregate_dataset_lmo_gap(lmo_rows, num_gap_bins=50)
+        lmo_dataset_rows = []
+        for (dataset, d0, gap_bin), (tmean, tstd, count) in sorted(lmo_dataset_agg.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
+            lmo_dataset_rows.append([dataset, d0, 10.0**d0, gap_bin, tmean, tstd, count])
+
+        _write_csv(
+            os.path.join(output_dir, "lmo_time_by_graph_tolerance_gap.csv"),
+            ["dataset", "graph_name", "start_epsilon_d0", "lmo_tolerance", "gap_bin", "mean_lmo_time_sec", "std_lmo_time_sec", "samples"],
+            lmo_graph_rows,
+        )
+
+        _write_csv(
+            os.path.join(output_dir, "lmo_time_by_dataset_tolerance_gap.csv"),
+            ["dataset", "start_epsilon_d0", "lmo_tolerance", "gap_bin", "mean_lmo_time_sec", "std_lmo_time_sec", "samples"],
+            lmo_dataset_rows,
+        )
+
+        _plot_per_graph_lmo_gap(lmo_rows, output_dir, num_gap_bins=50)
+        _plot_dataset_summary_lmo_gap(lmo_rows, output_dir, num_gap_bins=50)
 
     print("Plots and aggregate CSVs written to:", output_dir)
 

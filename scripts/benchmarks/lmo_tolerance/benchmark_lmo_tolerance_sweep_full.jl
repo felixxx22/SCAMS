@@ -10,7 +10,8 @@ run_lmo_tolerance_asymptotic_sweep(
     seed=42,
     epsilon=1e-2,
     linesearch=false,
-    start_epsilon_d0_values=[-1.0, -2.0, -3.0, -4.0, -5.0],
+    # Keep existing tolerances and add larger ones for comparison without overwriting past runs.
+    start_epsilon_d0_values=[1.0, 0.5, 0.0, -1.0, -2.0, -3.0, -4.0, -5.0],
     subset_k_per_dataset=3,
     include_bigexample_variants=true,
     tighten_arnoldi_tol=false,

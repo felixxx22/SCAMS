@@ -5,6 +5,12 @@ using Printf
 using Random
 using Statistics
 
+const _PROJECT_ROOT = normpath(joinpath(@__DIR__, "..", "..", ".."))
+
+function _project_path(parts...)
+    return normpath(joinpath(_PROJECT_ROOT, parts...))
+end
+
 function _read_existing_run_tags(summary_csv::AbstractString)
     tags = Set{String}()
     if !isfile(summary_csv)
@@ -92,12 +98,13 @@ function _scan_graph_stats(path::AbstractString)
 end
 
 function _list_bigexample_files(; include_variants=true)
-    files = filter(f -> endswith(f, ".txt"), readdir("BigExample"))
+    big_dir = _project_path("BigExample")
+    files = filter(f -> endswith(f, ".txt"), readdir(big_dir))
     if !include_variants
         files = filter(f -> !endswith(f, "2.txt"), files)
     end
 
-    paths = [joinpath("BigExample", f) for f in files]
+    paths = [joinpath(big_dir, f) for f in files]
     stats = [merge((path=p, name=basename(p), dataset="BigExample"), _scan_graph_stats(p)) for p in paths]
     sort!(stats, by=s -> (s.n, s.avg_degree, s.name))
     return stats
@@ -109,8 +116,9 @@ function _gset_numeric_id(name::AbstractString)
 end
 
 function _list_gset_files()
-    files = filter(f -> endswith(f, ".txt"), readdir("Gset"))
-    paths = [joinpath("Gset", f) for f in files]
+    gset_dir = _project_path("Gset")
+    files = filter(f -> endswith(f, ".txt"), readdir(gset_dir))
+    paths = [joinpath(gset_dir, f) for f in files]
     stats = [merge((path=p, name=basename(p), dataset="Gset"), _scan_graph_stats(p)) for p in paths]
     sort!(stats, by=s -> (_gset_numeric_id(s.name), s.n, s.avg_degree))
     return stats
@@ -351,7 +359,7 @@ function run_warmstart_vector_compare(;
 
     Random.seed!(seed)
 
-    outdir = joinpath("Result", "benchmarks_warmstart_vector_compare", phase)
+    outdir = _project_path("Result", "benchmarks_warmstart_vector_compare", phase)
     mkpath(outdir)
 
     gset_specs_all = _list_gset_files()
