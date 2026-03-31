@@ -203,6 +203,46 @@ function CutValue(A, z)
 end
 
 """
+    compute_diagonal_gradient_scaling(v; lowerBound=0, upperBound=1e16)
+
+    Computes the diagonal gradient matrix for the current iterate `v`:
+    `D[i] = clamp(1 / (2 * sqrt(v[i])), lowerBound, upperBound)`.
+
+    This represents the diagonal scaling matrix at the current Frank-Wolfe step.
+"""
+function compute_diagonal_gradient_scaling(v; lowerBound=0, upperBound=1e16)
+    D = zeros(n)
+    for i in 1:n
+        D[i] = clamp(1 / (2 * sqrt(v[i])), lowerBound, upperBound)
+    end
+    return D
+end
+
+"""
+    compute_scaled_warmstart_eigvec(w_prev, D_prev, E_current)
+
+    Transforms previous eigenvector from old gradient space (D_prev) to new gradient space (E_current).
+    Computes: x_0 = α (E_current^{-1/2} * D_prev^{1/2}) * w_prev
+    where α = 1 / sqrt(w_prev' * D_prev^{1/2} * E_current^{-1} * D_prev^{1/2} * w_prev).
+
+    Returns the scaled initial vector for Arnoldi with approximate unit norm.
+"""
+function compute_scaled_warmstart_eigvec(w_prev, D_prev, E_current; eps_safe=1e-8)
+    # Step 2: y_* = D_prev^{1/2} * w_prev
+    y_star = sqrt.(D_prev) .* w_prev
+
+    # Step 3: Compute α using E_current as the new gradient scaling
+    inv_E_sq = 1 ./ sqrt.(E_current .+ eps_safe)  # Safe inversion with eps
+    norm_ystar_in_E = sqrt(dot(y_star, (inv_E_sq .* inv_E_sq) .* y_star))
+    alpha = 1.0 / max(norm_ystar_in_E, eps_safe)
+
+    # Step 5: x_0 = α E_current^{-1/2} y_*
+    x0 = alpha .* inv_E_sq .* y_star
+
+    return x0
+end
+
+"""
     Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e16,
           plot=false, linesearch=false, numSample=1, mode="A",
           logfilename=nothing, startεd0=-3.0)
@@ -216,7 +256,7 @@ end
 
     Returns final iterate and best rounded sample/cut surrogate.
 """
-function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e16, plot=false, linesearch=false, numSample=1, mode="A", logfilename=nothing, startεd0=-3.0, benchmark=false, benchmarkTag=nothing, arnoldi_mindim=12, arnoldi_maxdim=20, arnoldi_restarts=500, adaptive_arnoldi_budget=false, update_low_threshold=1e-3, update_high_threshold=1e-2, low_budget_scale=0.7, high_budget_scale=1.6, tighten_arnoldi_tol=true, arnoldi_initial_vector=nothing, warmstart_reuse_leading_eigvec=false)
+function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e16, plot=false, linesearch=false, numSample=1, mode="A", logfilename=nothing, startεd0=-3.0, benchmark=false, benchmarkTag=nothing, arnoldi_mindim=12, arnoldi_maxdim=20, arnoldi_restarts=500, adaptive_arnoldi_budget=false, update_low_threshold=1e-3, update_high_threshold=1e-2, low_budget_scale=0.7, high_budget_scale=1.6, tighten_arnoldi_tol=true, arnoldi_initial_vector=nothing, warmstart_reuse_leading_eigvec=false, scaled_warmstart=false)
     v = v0
     t = t0
     # Keeps compatibility with the 2/(t+start) schedule used elsewhere.
@@ -242,6 +282,12 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
     next_lmo_time_samples = Float64[]
     next_lmo_mvproducts_samples = Float64[]
     delta_lambda_samples = Float64[]
+
+    # Telemetry for scaled warm-start strategy.
+    warmstart_x0_norm_samples = Float64[]
+    warmstart_y_star_norm_samples = Float64[]
+    warmstart_alpha_samples = Float64[]
+    warmstart_D_change_samples = Float64[]
 
     # Pre-sample Gaussian vectors for final cut extraction.
     z = rand(Normal(0, 1 / m), (numSample, m))
@@ -271,6 +317,10 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
     end
     first_lmo_init_source = requested_initvec === nothing ? "random" : "user"
     current_arnoldi_initvec = requested_initvec
+
+    # Initialize gradient scaling tracking for scaled warm-start.
+    D_current = compute_diagonal_gradient_scaling(v0, lowerBound=lowerBound, upperBound=upperBound)
+    D_prev = copy(D_current)
 
     # Start from configured Arnoldi tolerance; optional tightening can refine it later.
     εd0 = startεd0
@@ -335,6 +385,11 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
         # Core FW convex combination update.
         v = (1 - gamma) * v + gamma * q
 
+        # Compute new gradient scaling for current iterate.
+        E_current = compute_diagonal_gradient_scaling(v, lowerBound=lowerBound, upperBound=upperBound)
+        D_change_rel_linf = norm(E_current - D_prev, Inf) / max(norm(D_prev, Inf), eps(Float64))
+        push!(warmstart_D_change_samples, D_change_rel_linf)
+
         delta_v = v - v_before
         delta_v_l2 = norm(delta_v)
         delta_v_linf = norm(delta_v, Inf)
@@ -353,7 +408,34 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
             high_budget_scale,
         )
 
-        lmo_init_source = current_arnoldi_initvec === nothing ? "random" : "previous_eigvec"
+        # Determine warm-start initialization: scaled, eigvec-only, or random.
+        lmo_init_source = "random"
+        if scaled_warmstart && fw_iter_idx >= 1
+            # Use scaled warm-start: transform previous eigenvector to new gradient space.
+            try
+                x0_scaled = compute_scaled_warmstart_eigvec(prev_w, D_prev, E_current, eps_safe=1e-8)
+                x0_norm = norm(x0_scaled)
+                y_star = sqrt.(D_prev) .* prev_w
+                y_star_norm = norm(y_star)
+                alpha_val = 1.0 / max(sqrt(dot(y_star, (1 ./ sqrt.(E_current .+ 1e-8) .^ 2) .* y_star)), 1e-8)
+                push!(warmstart_x0_norm_samples, x0_norm)
+                push!(warmstart_y_star_norm_samples, y_star_norm)
+                push!(warmstart_alpha_samples, alpha_val)
+                current_arnoldi_initvec = x0_scaled
+                lmo_init_source = "scaled_eigvec"
+            catch e
+                @warn "Scaled warm-start computation failed: $e. Falling back to previous eigvec."
+                if warmstart_reuse_leading_eigvec
+                    current_arnoldi_initvec = copy(prev_w)
+                    lmo_init_source = "previous_eigvec"
+                else
+                    current_arnoldi_initvec = nothing
+                end
+            end
+        elseif current_arnoldi_initvec !== nothing
+            lmo_init_source = "previous_eigvec"
+        end
+
         w, q, λ, lmo_metrics = ArnoldiGrad(
             A,
             v,
@@ -401,6 +483,12 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
         end
 
         if benchmark && iter_log_path !== nothing
+            # Safely retrieve scaled warm-start telemetry or defaults.
+            warmstart_x0_norm_val = !isempty(warmstart_x0_norm_samples) ? warmstart_x0_norm_samples[end] : 0.0
+            warmstart_y_star_norm_val = !isempty(warmstart_y_star_norm_samples) ? warmstart_y_star_norm_samples[end] : 0.0
+            warmstart_alpha_val = !isempty(warmstart_alpha_samples) ? warmstart_alpha_samples[end] : 0.0
+            D_change_val = !isempty(warmstart_D_change_samples) ? warmstart_D_change_samples[end] : 0.0
+
             _append_csv_row(
                 iter_log_path,
                 [
@@ -413,6 +501,7 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
                     "cosine_similarity_next", "delta_w_next",
                     "lmo_init_source",
                     "arnoldi_budget_tier", "arnoldi_mindim", "arnoldi_maxdim", "arnoldi_restarts",
+                    "D_change_relative_linf", "warmstart_x0_norm", "warmstart_y_star_norm", "warmstart_alpha",
                     # Duplicated aliases for Python plotting without additional joins/renaming.
                     "next_lmo_time_sec", "next_partialschur_time_sec", "next_partialeigen_time_sec",
                     "next_lmo_mvproducts", "next_lmo_converged",
@@ -427,6 +516,7 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
                     cosine_similarity_next, delta_w_next,
                     lmo_init_source,
                     budget_tier, lmo_metrics.mindim, lmo_metrics.maxdim, lmo_metrics.restarts,
+                    D_change_val, warmstart_x0_norm_val, warmstart_y_star_norm_val, warmstart_alpha_val,
                     lmo_metrics.total_ns / 1e9, lmo_metrics.partialschur_ns / 1e9, lmo_metrics.partialeigen_ns / 1e9,
                     lmo_metrics.mvproducts, lmo_metrics.converged,
                 ],
@@ -435,7 +525,11 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
 
         prev_w = copy(w)
         prev_λ = λ
-        if warmstart_reuse_leading_eigvec
+        D_prev = copy(E_current)  # Update D_prev for next iteration's transformation.
+        if scaled_warmstart
+            # With scaled warm-start, previous eigenvector will be transformed in next iteration.
+            current_arnoldi_initvec = copy(w)
+        elseif warmstart_reuse_leading_eigvec
             current_arnoldi_initvec = copy(w)
         else
             current_arnoldi_initvec = nothing
@@ -471,6 +565,10 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
     corr_delta_v_to_next_mvproducts = _safe_correlation(delta_v_l2_samples, next_lmo_mvproducts_samples)
     corr_delta_v_to_delta_lambda = _safe_correlation(delta_v_l2_samples, delta_lambda_samples)
 
+    median_warmstart_D_change = _safe_median(warmstart_D_change_samples)
+    median_warmstart_x0_norm = _safe_median(warmstart_x0_norm_samples)
+    median_warmstart_alpha = _safe_median(warmstart_alpha_samples)
+
     bench = (
         run_tag=run_tag,
         solve_total_sec=solve_total_sec,
@@ -500,9 +598,13 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
         high_budget_scale=high_budget_scale,
         tighten_arnoldi_tol=tighten_arnoldi_tol,
         warmstart_reuse_leading_eigvec=warmstart_reuse_leading_eigvec,
+        scaled_warmstart=scaled_warmstart,
         warmstart_custom_init_provided=arnoldi_initial_vector !== nothing,
         warmstart_custom_init_accepted=requested_initvec !== nothing,
         first_lmo_init_source=first_lmo_init_source,
+        median_warmstart_D_change=median_warmstart_D_change,
+        median_warmstart_x0_norm=median_warmstart_x0_norm,
+        median_warmstart_alpha=median_warmstart_alpha,
     )
 
     if benchmark && summary_log_path !== nothing
@@ -517,8 +619,9 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
                 "corr_delta_v_to_next_lmo_time", "corr_delta_v_to_next_mvproducts", "corr_delta_v_to_delta_lambda",
                 "adaptive_arnoldi_budget", "arnoldi_mindim", "arnoldi_maxdim", "arnoldi_restarts",
                 "update_low_threshold", "update_high_threshold", "low_budget_scale", "high_budget_scale",
-                "tighten_arnoldi_tol", "warmstart_reuse_leading_eigvec", "warmstart_custom_init_provided",
-                "warmstart_custom_init_accepted", "first_lmo_init_source",
+                "tighten_arnoldi_tol", "warmstart_reuse_leading_eigvec", "scaled_warmstart",
+                "warmstart_custom_init_provided", "warmstart_custom_init_accepted", "first_lmo_init_source",
+                "median_warmstart_D_change", "median_warmstart_x0_norm", "median_warmstart_alpha",
             ],
             [
                 run_tag, mode, linesearch, ε, startεd0, fw_iter_idx,
@@ -529,8 +632,9 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
                 corr_delta_v_to_next_lmo_time, corr_delta_v_to_next_mvproducts, corr_delta_v_to_delta_lambda,
                 adaptive_arnoldi_budget, arnoldi_mindim, arnoldi_maxdim, arnoldi_restarts,
                 update_low_threshold, update_high_threshold, low_budget_scale, high_budget_scale,
-                tighten_arnoldi_tol, warmstart_reuse_leading_eigvec, arnoldi_initial_vector !== nothing,
-                requested_initvec !== nothing, first_lmo_init_source,
+                tighten_arnoldi_tol, warmstart_reuse_leading_eigvec, scaled_warmstart,
+                arnoldi_initial_vector !== nothing, requested_initvec !== nothing, first_lmo_init_source,
+                median_warmstart_D_change, median_warmstart_x0_norm, median_warmstart_alpha,
             ],
         )
     end
