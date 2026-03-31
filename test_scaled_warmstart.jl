@@ -12,7 +12,8 @@ Runs on small GSET sample graphs and outputs detailed CSV reports.
 include("MESDP.jl")
 include("ReadGSet.jl")
 
-using Printf, Statistics
+using Printf
+using Statistics
 using Dates
 
 # ============================================================================
@@ -52,7 +53,7 @@ function load_graph_and_init(graph_name::String)
     # Initialize v0: uniform scaling of diagonal
     v0 = ones(n)
     
-    @printf "Loaded %s: m=%d vertices (edges), n=%d vertices (nodes)\n" graph_name m n
+    @printf("Loaded %s: m=%d vertices (edges), n=%d vertices (nodes)\n", graph_name, m, n)
     return A, v0, (m, n)
 end
 
@@ -102,20 +103,20 @@ function print_comparison_table(graph_name, config_results)
     println("="^80)
     
     # Header
-    @printf "%15s | %10s | %10s | %10s | %12s | %12s | %12s\n" \
-        "Configuration" "Iterations" "LMO Calls" "Time (s)" "Avg LMO (s)" "Gap" "Converged"
+    @printf("%15s | %10s | %10s | %10s | %12s | %12s | %12s\n", 
+        "Configuration", "Iterations", "LMO Calls", "Time (s)", "Avg LMO (s)", "Gap", "Converged")
     println("-"^80)
     
     # Rows
     for summary in config_results
-        @printf "%15s | %10d | %10d | %10.4f | %12.6f | %12.2e | %12s\n" \
-            summary.config \
-            summary.iterations \
-            summary.lmo_calls \
-            summary.total_time_sec \
-            summary.avg_lmo_sec \
-            summary.final_gap \
-            (summary.converged ? "YES" : "NO")
+        @printf("%15s | %10d | %10d | %10.4f | %12.6f | %12.2e | %12s\n",
+            summary.config,
+            summary.iterations,
+            summary.lmo_calls,
+            summary.total_time_sec,
+            summary.avg_lmo_sec,
+            summary.final_gap,
+            (summary.converged ? "YES" : "NO"))
     end
     
     # Speedup analysis
@@ -128,12 +129,12 @@ function print_comparison_table(graph_name, config_results)
             summary = config_results[i]
             speedup = baseline_time / max(summary.total_time_sec, 1e-6)
             iter_reduction = 100 * (1 - summary.iterations / max(baseline_iters, 1))
-            @printf "  %s: {%.2f}x time | {%.1f}% fewer iters | median(D_change)={%.2e} | median(x0_norm)={:.4f}\n" \
-                summary.config \
-                speedup \
-                iter_reduction \
-                summary.median_D_change \
-                summary.median_x0_norm
+            @printf("  %s: %.2fx time | %.1f%% fewer iters | median(D_change)=%.2e | median(x0_norm)=%.4f\n",
+                summary.config,
+                speedup,
+                iter_reduction,
+                summary.median_D_change,
+                summary.median_x0_norm)
         end
     end
 end
@@ -141,7 +142,7 @@ end
 """Ensure output directory exists."""
 function ensure_output_dir()
     mkpath(RESULT_DIR)
-    @printf "Output directory: %s\n" realpath(RESULT_DIR)
+    @printf("Output directory: %s\n", realpath(RESULT_DIR))
 end
 
 # ============================================================================
@@ -154,7 +155,7 @@ function run_warmstart_benchmark_suite()
     overall_results = Dict()
     
     for graph_name in SAMPLE_GRAPHS
-        @printf "\n┌─ Testing graph: %s\n" graph_name
+        @printf("\n┌─ Testing graph: %s\n", graph_name)
         
         # Load graph
         A, v0, dims = load_graph_and_init(graph_name)
@@ -165,14 +166,14 @@ function run_warmstart_benchmark_suite()
         # Run all configurations
         config_results = []
         for config in WARMSTART_CONFIGS
-            @printf "  ├─ Running config: %s...\n" config.name
+            @printf("  ├─ Running config: %s...\n", config.name)
             try
                 result = run_solve_config(A, v0, config; benchmarkTag="$(graph_name)_$(run_timestamp)")
                 summary = format_config_summary(config, result)
                 push!(config_results, summary)
-                @printf "  │  ✓ Completed: %d iterations, %.4f s\n" summary.iterations summary.total_time_sec
+                @printf("  │  ✓ Completed: %d iterations, %.4f s\n", summary.iterations, summary.total_time_sec)
             catch e
-                @printf "  │  ✗ Failed: %s\n" string(e)
+                @printf("  │  ✗ Failed: %s\n", string(e))
                 push!(config_results, (
                     config=config.name, iterations=-1, lmo_calls=-1, total_time_sec=-1,
                     avg_lmo_sec=-1, final_gap=-1, converged=false,
@@ -189,7 +190,7 @@ function run_warmstart_benchmark_suite()
     println("\n" * "="^80)
     println("BENCHMARK COMPLETE")
     println("="^80)
-    @printf "Results saved to: %s\n" realpath(RESULT_DIR)
+    @printf("Results saved to: %s\n", realpath(RESULT_DIR))
     println("\nPer-graph CSVs:")
     for graph_name in SAMPLE_GRAPHS
         for config in WARMSTART_CONFIGS
@@ -206,12 +207,12 @@ end
 # ============================================================================
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    @printf "Julia Scaled Warmstart Benchmarking Suite\n"
-    @printf "========================================\n"
-    @printf "Sample graphs: %s\n" join(SAMPLE_GRAPHS, ", ")
-    @printf "FW tolerance: %.2e\n" FW_TOLERANCE
-    @printf "Mode: %s\n" MODE
-    @printf "Warmstart configs: %s\n" join([c.name for c in WARMSTART_CONFIGS], ", ")
+    @printf("Julia Scaled Warmstart Benchmarking Suite\n")
+    @printf("========================================\n")
+    @printf("Sample graphs: %s\n", join(SAMPLE_GRAPHS, ", "))
+    @printf("FW tolerance: %.2e\n", FW_TOLERANCE)
+    @printf("Mode: %s\n", MODE)
+    @printf("Warmstart configs: %s\n", join([c.name for c in WARMSTART_CONFIGS], ", "))
     
     results = run_warmstart_benchmark_suite()
 end
