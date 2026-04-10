@@ -161,11 +161,31 @@ def _iter_mvproducts(row: Dict[str, str]) -> float:
     return mvp
 
 
+def _resolve_input_root(input_root: str) -> str:
+    """Resolve common nesting patterns (e.g. <root>/full/full) to a usable data root."""
+    if not os.path.isdir(input_root):
+        return input_root
+
+    # If this root already contains per_graph data, use it as-is.
+    if glob.glob(os.path.join(input_root, "**", "per_graph", "*_summary.csv.iters.csv"), recursive=True):
+        return input_root
+
+    # Try common one-level phase nesting such as <root>/full or <root>/subset.
+    for child in sorted(os.listdir(input_root)):
+        child_path = os.path.join(input_root, child)
+        if not os.path.isdir(child_path):
+            continue
+        if glob.glob(os.path.join(child_path, "**", "per_graph", "*_summary.csv.iters.csv"), recursive=True):
+            return child_path
+
+    return input_root
+
+
 def _load_points(input_root: str, run_map: Dict[str, RunInfo]) -> Tuple[List[TimePoint], List[MVPoint]]:
     time_points: List[TimePoint] = []
     mv_points: List[MVPoint] = []
 
-    iter_paths = sorted(glob.glob(os.path.join(input_root, "*", "per_graph", "*_summary.csv.iters.csv")))
+    iter_paths = sorted(glob.glob(os.path.join(input_root, "**", "per_graph", "*_summary.csv.iters.csv"), recursive=True))
     for path in iter_paths:
         per_run_rows: Dict[str, List[Dict[str, str]]] = defaultdict(list)
         with open(path, "r", newline="", encoding="utf-8") as f:
@@ -486,7 +506,8 @@ def main() -> None:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, "..", "..", ".."))
 
-    input_root = args.input_root or os.path.join(project_root, "Result", "benchmarks_warmstart_strategy_compare", args.phase)
+    configured_input_root = args.input_root or os.path.join(project_root, "Result", "benchmarks_warmstart_strategy_compare", args.phase)
+    input_root = _resolve_input_root(configured_input_root)
     output_dir = args.output or os.path.join(input_root, "plots")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -497,7 +518,10 @@ def main() -> None:
     run_map = _parse_runs(runs_csv)
     time_points, mv_points = _load_points(input_root, run_map)
     if not time_points:
-        raise RuntimeError(f"No iteration rows found under: {input_root}")
+        raise RuntimeError(
+            "No iteration rows found under: "
+            f"{input_root} (configured input root: {configured_input_root})"
+        )
 
     time_bin_sec = args.time_bin_sec if args.time_bin_sec > 0 else _auto_bin_width_time(time_points)
     mv_bin = args.mv_bin if args.mv_bin > 0 else _auto_bin_width_mvproducts(mv_points)

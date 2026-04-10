@@ -135,17 +135,33 @@ function ArnoldiGrad(A, v; lowerBound=0, upperBound=1e16, tol=1e-2, D=ones(1, n)
     w = eigv[:, 1]
     q = B(A, v=w)
     if returnMetrics
+        partialschur_phase_sum_ns = history.expand_ns + history.schur_ns + history.partition_ns + history.restore_ns + history.basis_ns + history.finalize_ns
         metrics = (
             total_ns=t2_ns - t0_ns,
             partialschur_ns=t1_ns - t0_ns,
             partialeigen_ns=t2_ns - t1_ns,
             mvproducts=history.mvproducts,
+            restart_iters=history.restart_iters,
             nconverged=history.nconverged,
             converged=history.converged,
             nev=history.nev,
             mindim=local_mindim,
             maxdim=local_maxdim,
             restarts=local_restarts,
+            partialschur_expand_ns=history.expand_ns,
+            partialschur_schur_ns=history.schur_ns,
+            partialschur_partition_ns=history.partition_ns,
+            partialschur_restore_ns=history.restore_ns,
+            partialschur_basis_ns=history.basis_ns,
+            partialschur_finalize_ns=history.finalize_ns,
+            partialschur_restart_total_ns=history.restart_total_ns,
+            partialschur_phase_sum_ns=partialschur_phase_sum_ns,
+            restart_expand_ns=history.restart_expand_ns,
+            restart_schur_ns=history.restart_schur_ns,
+            restart_partition_ns=history.restart_partition_ns,
+            restart_restore_ns=history.restart_restore_ns,
+            restart_basis_ns=history.restart_basis_ns,
+            restart_total_ns_by_iter=history.restart_total_ns_by_iter,
         )
         return w, q, eig[1], metrics
     end
@@ -276,6 +292,15 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
     total_partialeigen_ns = 0
     total_fw_iter_ns = 0
     total_mvproducts = 0
+    total_restart_iters = 0
+    total_expand_ns = 0
+    total_schur_ns = 0
+    total_partition_ns = 0
+    total_restore_ns = 0
+    total_basis_ns = 0
+    total_finalize_ns = 0
+    total_restart_only_ns = 0
+    total_phase_sum_ns = 0
 
     # Iteration-level warm-start telemetry samples for summary CSV fields.
     delta_v_l2_samples = Float64[]
@@ -355,6 +380,15 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
     total_partialschur_ns += lmo_metrics.partialschur_ns
     total_partialeigen_ns += lmo_metrics.partialeigen_ns
     total_mvproducts += lmo_metrics.mvproducts
+    total_restart_iters += lmo_metrics.restart_iters
+    total_expand_ns += lmo_metrics.partialschur_expand_ns
+    total_schur_ns += lmo_metrics.partialschur_schur_ns
+    total_partition_ns += lmo_metrics.partialschur_partition_ns
+    total_restore_ns += lmo_metrics.partialschur_restore_ns
+    total_basis_ns += lmo_metrics.partialschur_basis_ns
+    total_finalize_ns += lmo_metrics.partialschur_finalize_ns
+    total_restart_only_ns += lmo_metrics.partialschur_restart_total_ns
+    total_phase_sum_ns += lmo_metrics.partialschur_phase_sum_ns
     gap = dot(q - v, ∇g(v, lowerBound=lowerBound, upperBound=upperBound, D=D)) / abs(f(v))
 
     # Previous LMO eigenpair acts as baseline for next-call movement tracking.
@@ -455,6 +489,15 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
         total_partialschur_ns += lmo_metrics.partialschur_ns
         total_partialeigen_ns += lmo_metrics.partialeigen_ns
         total_mvproducts += lmo_metrics.mvproducts
+        total_restart_iters += lmo_metrics.restart_iters
+        total_expand_ns += lmo_metrics.partialschur_expand_ns
+        total_schur_ns += lmo_metrics.partialschur_schur_ns
+        total_partition_ns += lmo_metrics.partialschur_partition_ns
+        total_restore_ns += lmo_metrics.partialschur_restore_ns
+        total_basis_ns += lmo_metrics.partialschur_basis_ns
+        total_finalize_ns += lmo_metrics.partialschur_finalize_ns
+        total_restart_only_ns += lmo_metrics.partialschur_restart_total_ns
+        total_phase_sum_ns += lmo_metrics.partialschur_phase_sum_ns
         gap = dot(q - v, ∇g(v, lowerBound=lowerBound, upperBound=upperBound, D=D)) / abs(f(v))
 
         delta_lambda_next = abs(λ - prev_λ)
@@ -488,6 +531,8 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
             warmstart_y_star_norm_val = !isempty(warmstart_y_star_norm_samples) ? warmstart_y_star_norm_samples[end] : 0.0
             warmstart_alpha_val = !isempty(warmstart_alpha_samples) ? warmstart_alpha_samples[end] : 0.0
             D_change_val = !isempty(warmstart_D_change_samples) ? warmstart_D_change_samples[end] : 0.0
+            phase_sum_ns = lmo_metrics.partialschur_phase_sum_ns
+            phase_coverage = lmo_metrics.partialschur_ns == 0 ? 0.0 : phase_sum_ns / lmo_metrics.partialschur_ns
 
             _append_csv_row(
                 iter_log_path,
@@ -495,7 +540,10 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
                     "run_tag", "iteration", "t", "mode", "linesearch", "gamma_source", "gamma",
                     "gap", "epsilon", "epsilon_d0", "iter_time_sec", "lmo_time_sec",
                     "partialschur_time_sec", "partialeigen_time_sec", "lmo_mvproducts",
-                    "lmo_converged", "lmo_nconverged", "lmo_nev",
+                    "lmo_converged", "lmo_nconverged", "lmo_nev", "lmo_restart_iters",
+                    "lmo_expand_time_sec", "lmo_schur_time_sec", "lmo_partition_time_sec",
+                    "lmo_restore_time_sec", "lmo_basis_time_sec", "lmo_finalize_time_sec",
+                    "lmo_restart_total_time_sec", "lmo_phase_sum_time_sec", "lmo_phase_coverage",
                     "delta_v_l2", "delta_v_linf", "delta_v_rel_l2",
                     "lambda_t", "lambda_next", "delta_lambda_next",
                     "cosine_similarity_next", "delta_w_next",
@@ -510,7 +558,11 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
                     run_tag, fw_iter_idx, t, mode, linesearch, gamma_source, gamma,
                     gap, ε, εd0, iter_ns / 1e9, lmo_metrics.total_ns / 1e9,
                     lmo_metrics.partialschur_ns / 1e9, lmo_metrics.partialeigen_ns / 1e9, lmo_metrics.mvproducts,
-                    lmo_metrics.converged, lmo_metrics.nconverged, lmo_metrics.nev,
+                    lmo_metrics.converged, lmo_metrics.nconverged, lmo_metrics.nev, lmo_metrics.restart_iters,
+                    lmo_metrics.partialschur_expand_ns / 1e9, lmo_metrics.partialschur_schur_ns / 1e9,
+                    lmo_metrics.partialschur_partition_ns / 1e9, lmo_metrics.partialschur_restore_ns / 1e9,
+                    lmo_metrics.partialschur_basis_ns / 1e9, lmo_metrics.partialschur_finalize_ns / 1e9,
+                    lmo_metrics.partialschur_restart_total_ns / 1e9, phase_sum_ns / 1e9, phase_coverage,
                     delta_v_l2, delta_v_linf, delta_v_rel_l2,
                     prev_λ, λ, delta_lambda_next,
                     cosine_similarity_next, delta_w_next,
@@ -559,6 +611,16 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
     avg_partialschur_sec = lmo_calls == 0 ? 0.0 : (total_partialschur_ns / lmo_calls) / 1e9
     avg_partialeigen_sec = lmo_calls == 0 ? 0.0 : (total_partialeigen_ns / lmo_calls) / 1e9
     lmo_share = solve_total_sec == 0 ? 0.0 : (total_lmo_ns / 1e9) / solve_total_sec
+    avg_restart_iters = lmo_calls == 0 ? 0.0 : total_restart_iters / lmo_calls
+    total_arnoldi_expand_sec = total_expand_ns / 1e9
+    total_arnoldi_schur_sec = total_schur_ns / 1e9
+    total_arnoldi_partition_sec = total_partition_ns / 1e9
+    total_arnoldi_restore_sec = total_restore_ns / 1e9
+    total_arnoldi_basis_sec = total_basis_ns / 1e9
+    total_arnoldi_finalize_sec = total_finalize_ns / 1e9
+    total_arnoldi_restart_only_sec = total_restart_only_ns / 1e9
+    total_arnoldi_phase_sum_sec = total_phase_sum_ns / 1e9
+    arnoldi_phase_coverage = total_partialschur_ns == 0 ? 0.0 : total_phase_sum_ns / total_partialschur_ns
     median_delta_v_l2 = _safe_median(delta_v_l2_samples)
     p90_delta_v_l2 = _safe_quantile(delta_v_l2_samples, 0.9)
     corr_delta_v_to_next_lmo_time = _safe_correlation(delta_v_l2_samples, next_lmo_time_samples)
@@ -579,6 +641,16 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
         avg_lmo_sec=avg_lmo_sec,
         avg_partialschur_sec=avg_partialschur_sec,
         avg_partialeigen_sec=avg_partialeigen_sec,
+        avg_restart_iters=avg_restart_iters,
+        total_arnoldi_expand_sec=total_arnoldi_expand_sec,
+        total_arnoldi_schur_sec=total_arnoldi_schur_sec,
+        total_arnoldi_partition_sec=total_arnoldi_partition_sec,
+        total_arnoldi_restore_sec=total_arnoldi_restore_sec,
+        total_arnoldi_basis_sec=total_arnoldi_basis_sec,
+        total_arnoldi_finalize_sec=total_arnoldi_finalize_sec,
+        total_arnoldi_restart_only_sec=total_arnoldi_restart_only_sec,
+        total_arnoldi_phase_sum_sec=total_arnoldi_phase_sum_sec,
+        arnoldi_phase_coverage=arnoldi_phase_coverage,
         total_mvproducts=total_mvproducts,
         final_gap=gap,
         lmo_share=lmo_share,
@@ -614,6 +686,10 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
                 "run_tag", "mode", "linesearch", "epsilon", "start_epsilon_d0", "fw_iterations",
                 "solve_total_time_sec", "avg_fw_iter_time_sec", "lmo_calls", "total_lmo_time_sec",
                 "avg_lmo_time_sec", "avg_partialschur_time_sec", "avg_partialeigen_time_sec",
+                "avg_restart_iters", "total_arnoldi_expand_time_sec", "total_arnoldi_schur_time_sec",
+                "total_arnoldi_partition_time_sec", "total_arnoldi_restore_time_sec",
+                "total_arnoldi_basis_time_sec", "total_arnoldi_finalize_time_sec",
+                "total_arnoldi_restart_only_time_sec", "total_arnoldi_phase_sum_time_sec", "arnoldi_phase_coverage",
                 "total_mvproducts", "lmo_time_share", "final_gap", "converged",
                 "median_delta_v_l2", "p90_delta_v_l2",
                 "corr_delta_v_to_next_lmo_time", "corr_delta_v_to_next_mvproducts", "corr_delta_v_to_delta_lambda",
@@ -627,6 +703,10 @@ function Solve(A, v0; D=ones((1, n)), t0=2, ε=1e-3, lowerBound=0, upperBound=1e
                 run_tag, mode, linesearch, ε, startεd0, fw_iter_idx,
                 solve_total_sec, avg_fw_iter_sec, lmo_calls, total_lmo_ns / 1e9,
                 avg_lmo_sec, avg_partialschur_sec, avg_partialeigen_sec,
+                avg_restart_iters, total_arnoldi_expand_sec, total_arnoldi_schur_sec,
+                total_arnoldi_partition_sec, total_arnoldi_restore_sec,
+                total_arnoldi_basis_sec, total_arnoldi_finalize_sec,
+                total_arnoldi_restart_only_sec, total_arnoldi_phase_sum_sec, arnoldi_phase_coverage,
                 total_mvproducts, lmo_share, gap, gap <= ε,
                 median_delta_v_l2, p90_delta_v_l2,
                 corr_delta_v_to_next_lmo_time, corr_delta_v_to_next_mvproducts, corr_delta_v_to_delta_lambda,

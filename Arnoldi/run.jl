@@ -127,16 +127,31 @@ end
     @inbounds return r.ritz.rs[i] < max(eps(T) * r.H_frob_norm[], r.tol * abs(r.ritz.λs[i]))
 
 """
-    History(mvproducts, nconverged, converged, nev)
+    History(mvproducts, restart_iters, nconverged, converged, nev, ...)
 
-History shows whether the method has converged (when `nconverged` ≥ `nev`) and
-how many matrix-vector products were necessary to do so.
+History shows whether the method has converged (when `nconverged` ≥ `nev`), how
+many matrix-vector products were necessary to do so, and restart-level timing
+telemetry for core `partialschur` phases.
 """
 struct History
     mvproducts::Int
+    restart_iters::Int
     nconverged::Int
     converged::Bool
     nev::Int
+    expand_ns::Int
+    schur_ns::Int
+    partition_ns::Int
+    restore_ns::Int
+    basis_ns::Int
+    finalize_ns::Int
+    restart_total_ns::Int
+    restart_expand_ns::Vector{Int}
+    restart_schur_ns::Vector{Int}
+    restart_partition_ns::Vector{Int}
+    restart_restore_ns::Vector{Int}
+    restart_basis_ns::Vector{Int}
+    restart_total_ns_by_iter::Vector{Int}
 end
 
 function _partialschur(A, λ, ::Type{T}, mindim::Int, maxdim::Int, nev::Int, tol::Ttol, restarts::Int, which::Target; mode, initvec=nothing) where {T,Ttol<:Real}
@@ -180,14 +195,33 @@ function _partialschur(A, λ, ::Type{T}, mindim::Int, maxdim::Int, nev::Int, tol
     # Bookkeeping for number of mv-products
     prods = mindim
 
+    # Per-restart and aggregate internal timing telemetry (nanoseconds).
+    restart_expand_ns = Int[]
+    restart_schur_ns = Int[]
+    restart_partition_ns = Int[]
+    restart_restore_ns = Int[]
+    restart_basis_ns = Int[]
+    restart_total_ns_by_iter = Int[]
+
+    expand_ns_total = 0
+    schur_ns_total = 0
+    partition_ns_total = 0
+    restore_ns_total = 0
+    basis_ns_total = 0
+
     # Initialize an Arnoldi relation of size `mindim`
     reinitialize!(arnoldi; initvec=initvec)
     iterate_arnoldi!(A, λ, arnoldi, 1:mindim, mode=mode)
 
+    restart_iters = 0
     for iter = 1:restarts
+        restart_iters = iter
+        restart_t0 = time_ns()
 
         # Expand Krylov subspace dimension from `k` to `maxdim`.
+        expand_t0 = time_ns()
         iterate_arnoldi!(A, λ, arnoldi, k+1:maxdim, mode=mode)
+        expand_ns = time_ns() - expand_t0
 
         # Bookkeeping
         prods += length(k+1:maxdim)
@@ -196,9 +230,12 @@ function _partialschur(A, λ, ::Type{T}, mindim::Int, maxdim::Int, nev::Int, tol
         copyto!(Q, I)
 
         # Construct Schur decomposition of H[active:maxdim,active:maxdim] in-place
+        schur_t0 = time_ns()
         local_schurfact!(view(H, OneTo(maxdim), :), active, maxdim, Q)
+        schur_ns = time_ns() - schur_t0
 
         # Update the Ritz values
+        partition_t0 = time_ns()
         copyto!(ritz.ord, OneTo(maxdim))
         copy_eigenvalues!(ritz.λs, H)
         copy_residuals!(ritz.rs, H, Q, H[maxdim+1, maxdim], x, active:maxdim)
@@ -255,16 +292,34 @@ function _partialschur(A, λ, ::Type{T}, mindim::Int, maxdim::Int, nev::Int, tol
         end
 
         partition_schur_three_way!(H, Q, groups)
+        partition_ns = time_ns() - partition_t0
 
         # Restore the Hessenberg matrix via Householder reflections.
         # Note that we restore the new active part only -- Q[end, 1:nlock] is small enough
         # by convergence criterion.
+        restore_t0 = time_ns()
         restore_arnoldi!(H, nlock + 1, k, Q, G)
+        restore_ns = time_ns() - restore_t0
 
         # Finally do the change of basis to get the length `k` Arnoldi relation.
+        basis_t0 = time_ns()
         @views mul!(Vtmp[:, active:k], V[:, active:maxdim], Q[active:maxdim, active:k])
         @views copyto!(V[:, active:k], Vtmp[:, active:k])
         @views copyto!(V[:, k+1], V[:, maxdim+1])
+        basis_ns = time_ns() - basis_t0
+
+        push!(restart_expand_ns, expand_ns)
+        push!(restart_schur_ns, schur_ns)
+        push!(restart_partition_ns, partition_ns)
+        push!(restart_restore_ns, restore_ns)
+        push!(restart_basis_ns, basis_ns)
+        push!(restart_total_ns_by_iter, time_ns() - restart_t0)
+
+        expand_ns_total += expand_ns
+        schur_ns_total += schur_ns
+        partition_ns_total += partition_ns
+        restore_ns_total += restore_ns
+        basis_ns_total += basis_ns
 
         # The active part 
         active = nlock + 1
@@ -278,6 +333,7 @@ function _partialschur(A, λ, ::Type{T}, mindim::Int, maxdim::Int, nev::Int, tol
     @views Hconverged = H[1:nconverged, 1:nconverged]
 
     # Sort the converged eigenvalues like the user wants them
+    finalize_t0 = time_ns()
     sortschur!(H, copyto!(Q, I), nconverged, ordering)
 
     # Change of basis
@@ -286,8 +342,30 @@ function _partialschur(A, λ, ::Type{T}, mindim::Int, maxdim::Int, nev::Int, tol
 
     # Copy the eigenvalues just one more time
     copy_eigenvalues!(ritz.λs, H, OneTo(nconverged))
+    finalize_ns = time_ns() - finalize_t0
 
-    history = History(prods, nconverged, nconverged ≥ nev, nev)
+    restart_total_ns = sum(restart_total_ns_by_iter)
+
+    history = History(
+        prods,
+        restart_iters,
+        nconverged,
+        nconverged ≥ nev,
+        nev,
+        expand_ns_total,
+        schur_ns_total,
+        partition_ns_total,
+        restore_ns_total,
+        basis_ns_total,
+        finalize_ns,
+        restart_total_ns,
+        restart_expand_ns,
+        restart_schur_ns,
+        restart_partition_ns,
+        restart_restore_ns,
+        restart_basis_ns,
+        restart_total_ns_by_iter,
+    )
     schur = PartialSchur(Vconverged, Hconverged, ritz.λs[1:nconverged])
 
     return schur, history

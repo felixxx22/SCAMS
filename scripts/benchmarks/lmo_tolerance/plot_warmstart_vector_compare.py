@@ -219,6 +219,27 @@ def _group_mean_std(values: Sequence[float]) -> Tuple[float, float]:
     return m, math.sqrt(max(0.0, var))
 
 
+def _quantile(sorted_vals: Sequence[float], q: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    pos = (len(sorted_vals) - 1) * q
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return sorted_vals[lo]
+    frac = pos - lo
+    return sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac
+
+
+def _group_quartiles(values: Sequence[float]) -> Tuple[float, float, float]:
+    if not values:
+        return 0.0, 0.0, 0.0
+    ordered = sorted(values)
+    return _quantile(ordered, 0.25), _quantile(ordered, 0.50), _quantile(ordered, 0.75)
+
+
 def _write_csv(path: str, header: Sequence[str], rows: Sequence[Sequence[object]]) -> None:
     parent = os.path.dirname(path)
     if parent:
@@ -395,16 +416,23 @@ def _plot_dataset_iteration(rows: Sequence[IterPoint], output_dir: str) -> None:
                 if s != strategy:
                     continue
                 gmean, _ = _group_mean_std(vals)
-                pts.append((it, gmean))
+                q1, _, q3 = _group_quartiles(vals)
+                pts.append((it, gmean, q1, q3))
             pts.sort(key=lambda p: p[0])
             if not pts:
                 continue
-            ax.plot([p[0] for p in pts], [p[1] for p in pts], linewidth=2.0, label=_pretty_strategy(strategy), color=_strategy_color(strategy))
+            xs = [p[0] for p in pts]
+            ys_mean = [p[1] for p in pts]
+            ys_q1 = [p[2] for p in pts]
+            ys_q3 = [p[3] for p in pts]
+            color = _strategy_color(strategy)
+            ax.fill_between(xs, ys_q1, ys_q3, color=color, alpha=0.18)
+            ax.plot(xs, ys_mean, linewidth=2.0, label=_pretty_strategy(strategy), color=color)
 
         ax.set_yscale("log")
         ax.set_title(f"Dataset Summary Gap vs Iteration | {dataset}")
         ax.set_xlabel("FW iteration")
-        ax.set_ylabel("mean gap across selected graphs")
+        ax.set_ylabel("mean gap across selected graphs (shaded: IQR)")
         ax.grid(True, alpha=0.25)
         ax.legend()
         fig.tight_layout()
@@ -431,16 +459,23 @@ def _plot_dataset_time(rows: Sequence[TimePoint], output_dir: str, bin_width_sec
                 if s != strategy:
                     continue
                 gmean, _ = _group_mean_std(vals)
-                pts.append((tb, gmean))
+                q1, _, q3 = _group_quartiles(vals)
+                pts.append((tb, gmean, q1, q3))
             pts.sort(key=lambda p: p[0])
             if not pts:
                 continue
-            ax.plot([p[0] for p in pts], [p[1] for p in pts], linewidth=2.0, label=_pretty_strategy(strategy), color=_strategy_color(strategy))
+            xs = [p[0] for p in pts]
+            ys_mean = [p[1] for p in pts]
+            ys_q1 = [p[2] for p in pts]
+            ys_q3 = [p[3] for p in pts]
+            color = _strategy_color(strategy)
+            ax.fill_between(xs, ys_q1, ys_q3, color=color, alpha=0.18)
+            ax.plot(xs, ys_mean, linewidth=2.0, label=_pretty_strategy(strategy), color=color)
 
         ax.set_yscale("log")
         ax.set_title(f"Dataset Summary Gap vs Time | {dataset}")
         ax.set_xlabel("elapsed FW time (sec)")
-        ax.set_ylabel("mean gap across selected graphs")
+        ax.set_ylabel("mean gap across selected graphs (shaded: IQR)")
         ax.grid(True, alpha=0.25)
         ax.legend()
         fig.tight_layout()
